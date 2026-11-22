@@ -70,53 +70,52 @@ function PlayerAvatar() {
   );
 }
 
-function GameArena({ active, spawned, weapon }) {
+function GameArena({ active, weapon, socket, playerId, gameState }) {
   const canvasRef = useRef(null);
   const activeRef = useRef(active);
-  const spawnedRef = useRef(spawned);
   const weaponRef = useRef(weapon);
+  const gameStateRef = useRef(gameState);
+  const playerIdRef = useRef(playerId);
 
   useEffect(() => {
     activeRef.current = active;
-  }, [active]);
-
-  useEffect(() => {
-    spawnedRef.current = spawned;
-  }, [spawned]);
-
-  useEffect(() => {
     weaponRef.current = weapon;
-  }, [weapon]);
+    gameStateRef.current = gameState;
+    playerIdRef.current = playerId;
+  }, [active, weapon, gameState, playerId]);
+
+  useEffect(() => {
+    if (active || !playerId || socket?.readyState !== WebSocket.OPEN) return;
+    const player = gameStateRef.current.players.find((item) => item.id === playerId);
+    socket.send(JSON.stringify({
+      type: 'input',
+      moveX: 0,
+      moveY: 0,
+      aim: player?.angle ?? 0,
+      shooting: false,
+      weapon: weapon.code,
+    }));
+  }, [active, playerId, socket, weapon]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
     const keys = new Set();
-    let mouse = { x: 0, y: 0 };
-    let player = { x: 0, y: 0 };
+    const mouse = { x: 0, y: 0 };
+    let shooting = false;
     let animationFrame;
-    let mouseDown = false;
-    let lastShotAt = 0;
-    const bullets = [];
+    let inputTimer;
+    let canvasWidth = 0;
+    let canvasHeight = 0;
 
     const resize = () => {
       const rect = canvas.getBoundingClientRect();
-      const previousWidth = canvas.width || rect.width;
-      const previousHeight = canvas.height || rect.height;
       const pixelRatio = window.devicePixelRatio || 1;
+      canvasWidth = rect.width;
+      canvasHeight = rect.height;
       canvas.width = Math.round(rect.width * pixelRatio);
       canvas.height = Math.round(rect.height * pixelRatio);
       context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-
-      if (player.x === 0 && player.y === 0) {
-        player.x = rect.width / 2;
-        player.y = rect.height / 2;
-      } else {
-        player.x = (player.x / previousWidth) * rect.width;
-        player.y = (player.y / previousHeight) * rect.height;
-      }
-      mouse.x = player.x + 100;
-      mouse.y = player.y;
     };
 
     const handleKeyDown = (event) => {
@@ -132,139 +131,115 @@ function GameArena({ active, spawned, weapon }) {
       mouse.y = event.clientY - rect.top;
     };
     const handleMouseDown = (event) => {
-      if (event.button === 0) mouseDown = true;
+      if (activeRef.current && event.button === 0) shooting = true;
     };
     const handleMouseUp = () => {
-      mouseDown = false;
+      shooting = false;
     };
 
-    const obstacles = [
-      { x: 0.18, y: 0.25, width: 0.14, height: 0.06 },
-      { x: 0.68, y: 0.28, width: 0.16, height: 0.06 },
-      { x: 0.24, y: 0.68, width: 0.12, height: 0.07 },
-      { x: 0.69, y: 0.71, width: 0.13, height: 0.07 },
-    ];
+    const sendInput = () => {
+      const currentSocket = socket;
+      const currentState = gameStateRef.current;
+      const currentPlayer = currentState?.players.find((player) => player.id === playerIdRef.current);
+      if (!activeRef.current || !currentPlayer || currentSocket?.readyState !== WebSocket.OPEN) return;
+
+      let moveX = 0;
+      let moveY = 0;
+      if (keys.has('KeyA') || keys.has('ArrowLeft')) moveX -= 1;
+      if (keys.has('KeyD') || keys.has('ArrowRight')) moveX += 1;
+      if (keys.has('KeyW') || keys.has('ArrowUp')) moveY -= 1;
+      if (keys.has('KeyS') || keys.has('ArrowDown')) moveY += 1;
+      const cameraX = Math.max(0, Math.min(currentState.world.width - canvasWidth, currentPlayer.x - canvasWidth / 2));
+      const cameraY = Math.max(0, Math.min(currentState.world.height - canvasHeight, currentPlayer.y - canvasHeight / 2));
+      const aim = Math.atan2(mouse.y + cameraY - currentPlayer.y, mouse.x + cameraX - currentPlayer.x);
+
+      currentSocket.send(JSON.stringify({
+        type: 'input',
+        moveX,
+        moveY,
+        aim,
+        shooting,
+        weapon: weaponRef.current.code,
+      }));
+    };
 
     const draw = () => {
-      const rect = canvas.getBoundingClientRect();
-      context.clearRect(0, 0, rect.width, rect.height);
-
+      const state = gameStateRef.current;
+      context.clearRect(0, 0, canvasWidth, canvasHeight);
       context.fillStyle = '#1b2a24';
-      context.fillRect(0, 0, rect.width, rect.height);
+      context.fillRect(0, 0, canvasWidth, canvasHeight);
 
+      const localPlayer = state?.players.find((player) => player.id === playerIdRef.current);
+      const world = state?.world ?? { width: canvasWidth, height: canvasHeight };
+      const cameraX = localPlayer ? Math.max(0, Math.min(world.width - canvasWidth, localPlayer.x - canvasWidth / 2)) : 0;
+      const cameraY = localPlayer ? Math.max(0, Math.min(world.height - canvasHeight, localPlayer.y - canvasHeight / 2)) : 0;
+
+      context.save();
+      context.translate(-cameraX, -cameraY);
       context.strokeStyle = 'rgba(150, 180, 160, 0.11)';
       context.lineWidth = 1;
-      for (let x = 0; x < rect.width; x += 48) {
+      for (let x = 0; x <= world.width; x += 48) {
         context.beginPath();
         context.moveTo(x, 0);
-        context.lineTo(x, rect.height);
+        context.lineTo(x, world.height);
         context.stroke();
       }
-      for (let y = 0; y < rect.height; y += 48) {
+      for (let y = 0; y <= world.height; y += 48) {
         context.beginPath();
         context.moveTo(0, y);
-        context.lineTo(rect.width, y);
+        context.lineTo(world.width, y);
         context.stroke();
       }
 
       context.fillStyle = '#657169';
-      obstacles.forEach((obstacle) => {
-        context.fillRect(
-          obstacle.x * rect.width,
-          obstacle.y * rect.height,
-          obstacle.width * rect.width,
-          obstacle.height * rect.height,
-        );
-      });
+      [
+        { x: 260, y: 250, width: 280, height: 72 },
+        { x: 1360, y: 280, width: 320, height: 72 },
+        { x: 420, y: 790, width: 240, height: 84 },
+        { x: 1380, y: 830, width: 260, height: 84 },
+      ].forEach((obstacle) => context.fillRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height));
 
-      let dx = 0;
-      let dy = 0;
-      if (keys.has('KeyW') || keys.has('ArrowUp')) dy -= 1;
-      if (keys.has('KeyS') || keys.has('ArrowDown')) dy += 1;
-      if (keys.has('KeyA') || keys.has('ArrowLeft')) dx -= 1;
-      if (keys.has('KeyD') || keys.has('ArrowRight')) dx += 1;
-      if (activeRef.current && (dx !== 0 || dy !== 0)) {
-        const length = Math.hypot(dx, dy);
-        const speed = 3.1;
-        player.x += (dx / length) * speed;
-        player.y += (dy / length) * speed;
-        player.x = Math.max(22, Math.min(rect.width - 22, player.x));
-        player.y = Math.max(22, Math.min(rect.height - 22, player.y));
-      }
-
-      const angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
-      const now = performance.now();
-      if (
-        activeRef.current &&
-        spawnedRef.current &&
-        mouseDown &&
-        now - lastShotAt >= 180
-      ) {
-        const gun = weaponRef.current;
-        const barrelLength = gun.barrelLength;
-        const startX = player.x + Math.cos(angle) * (barrelLength + 17);
-        const startY = player.y + Math.sin(angle) * (barrelLength + 17);
-        bullets.push({
-          x: startX,
-          y: startY,
-          dx: Math.cos(angle) * 11,
-          dy: Math.sin(angle) * 11,
-          life: 65,
-        });
-        lastShotAt = now;
-      }
-
-      for (let index = bullets.length - 1; index >= 0; index -= 1) {
-        const bullet = bullets[index];
-        bullet.x += bullet.dx;
-        bullet.y += bullet.dy;
-        bullet.life -= 1;
-        if (bullet.life <= 0) {
-          bullets.splice(index, 1);
-        }
-      }
-
-      bullets.forEach((bullet) => {
+      (state?.bullets ?? []).forEach((bullet) => {
+        const magnitude = Math.hypot(bullet.dx, bullet.dy) || 1;
+        const tailLength = 16;
         context.beginPath();
-        context.moveTo(bullet.x - bullet.dx * 1.4, bullet.y - bullet.dy * 1.4);
+        context.moveTo(bullet.x - (bullet.dx / magnitude) * tailLength, bullet.y - (bullet.dy / magnitude) * tailLength);
         context.lineTo(bullet.x, bullet.y);
         context.strokeStyle = '#aeb2b4';
-        context.lineWidth = 2;
+        context.lineWidth = 3;
         context.stroke();
       });
 
-      if (spawnedRef.current) {
+      (state?.players ?? []).forEach((player) => {
+        const gun = guns.find((item) => item.code === player.weapon) ?? guns[0];
         context.save();
         context.translate(player.x, player.y);
-        context.rotate(angle);
-        const gun = weaponRef.current;
+        context.rotate(player.angle);
         context.fillStyle = '#30373d';
         context.fillRect(15, -(gun.barrelHeight / 2), gun.barrelLength, gun.barrelHeight);
         context.fillStyle = '#15191d';
         context.fillRect(15 + gun.barrelLength - 3, -(gun.barrelHeight / 2) - 1, 12, gun.barrelHeight + 2);
         if (gun.code === 'awm-s') {
-          context.fillStyle = '#15191d';
           context.fillRect(24, -(gun.barrelHeight / 2) - 9, 24, 5);
         }
         if (gun.code === 'minigun') {
-          context.fillStyle = '#22272b';
           context.fillRect(24, -gun.barrelHeight / 2 - 4, 28, 3);
           context.fillRect(24, gun.barrelHeight / 2 + 1, 28, 3);
         }
         if (gun.code === 'submachine-gun' || gun.code === 'semi-auto') {
-          context.fillStyle = '#15191d';
           context.fillRect(22, gun.barrelHeight / 2 - 1, 9, 13);
         }
         context.restore();
 
         context.beginPath();
         context.arc(player.x, player.y, 22, 0, Math.PI * 2);
-        context.fillStyle = '#63b36a';
+        context.fillStyle = player.id === playerIdRef.current ? '#63b36a' : '#5596d1';
         context.fill();
         context.lineWidth = 4;
         context.strokeStyle = '#d9eddb';
         context.stroke();
-      }
+      });
+      context.restore();
 
       animationFrame = window.requestAnimationFrame(draw);
     };
@@ -276,10 +251,12 @@ function GameArena({ active, spawned, weapon }) {
     canvas.addEventListener('mousemove', handleMouseMove);
     canvas.addEventListener('mousedown', handleMouseDown);
     window.addEventListener('mouseup', handleMouseUp);
+    inputTimer = window.setInterval(sendInput, 50);
     animationFrame = window.requestAnimationFrame(draw);
 
     return () => {
       window.cancelAnimationFrame(animationFrame);
+      window.clearInterval(inputTimer);
       window.removeEventListener('resize', resize);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
@@ -287,18 +264,98 @@ function GameArena({ active, spawned, weapon }) {
       canvas.removeEventListener('mousedown', handleMouseDown);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, []);
+  }, [socket]);
 
-  return <canvas className="game-canvas" ref={canvasRef} aria-label="2D game arena" />;
+  return <canvas className="game-canvas" ref={canvasRef} aria-label="Multiplayer game arena" />;
 }
 
 function App() {
   const currentUser = null;
+  const serverUrl = import.meta.env.VITE_GAME_SERVER_URL;
   const [gameActive, setGameActive] = useState(false);
-  const [hasSpawned, setHasSpawned] = useState(false);
+  const [socket, setSocket] = useState(null);
+  const [connectionStatus, setConnectionStatus] = useState(serverUrl ? 'connecting' : 'not-configured');
+  const [playerId, setPlayerId] = useState(null);
+  const [gameState, setGameState] = useState({ world: { width: 2000, height: 1200 }, players: [], bullets: [] });
   const [serverPanelOpen, setServerPanelOpen] = useState(false);
   const [loadoutOpen, setLoadoutOpen] = useState(false);
   const [selectedGun, setSelectedGun] = useState(guns[0]);
+  const joinRequested = useRef(false);
+  const socketRef = useRef(null);
+
+  useEffect(() => {
+    if (!serverUrl) {
+      setConnectionStatus('not-configured');
+      return undefined;
+    }
+
+    let reconnectTimer;
+    let shouldReconnect = true;
+    const connect = () => {
+      setConnectionStatus('connecting');
+      const currentSocket = new WebSocket(serverUrl);
+      socketRef.current = currentSocket;
+      setSocket(currentSocket);
+
+      currentSocket.addEventListener('open', () => {
+        setConnectionStatus('connected');
+        if (joinRequested.current) {
+          setConnectionStatus('joining');
+          currentSocket.send(JSON.stringify({ type: 'join' }));
+        }
+      });
+
+      currentSocket.addEventListener('message', (event) => {
+        let message;
+        try {
+          message = JSON.parse(event.data);
+        } catch (error) {
+          console.error('Received an invalid message from the game server.', error);
+          setConnectionStatus('error');
+          return;
+        }
+
+        if (message.type === 'joined') {
+          joinRequested.current = false;
+          setPlayerId(message.playerId);
+          setGameActive(true);
+          setConnectionStatus('connected');
+        } else if (message.type === 'state') {
+          setGameState(message);
+        } else if (message.type === 'error') {
+          joinRequested.current = false;
+          setConnectionStatus('error');
+          console.error(`Game server error: ${message.message}`);
+        }
+      });
+
+      currentSocket.addEventListener('error', (error) => {
+        console.error('Could not connect to the game server.', error);
+        setConnectionStatus('error');
+      });
+
+      currentSocket.addEventListener('close', () => {
+        if (socketRef.current === currentSocket) {
+          socketRef.current = null;
+          setSocket(null);
+        }
+        joinRequested.current = false;
+        setPlayerId(null);
+        setGameState({ world: { width: 2000, height: 1200 }, players: [], bullets: [] });
+        setGameActive(false);
+        setConnectionStatus('disconnected');
+        if (shouldReconnect) reconnectTimer = window.setTimeout(connect, 2000);
+      });
+    };
+
+    connect();
+    return () => {
+      shouldReconnect = false;
+      window.clearTimeout(reconnectTimer);
+      socketRef.current?.close();
+      socketRef.current = null;
+    };
+  }, [serverUrl]);
 
   useEffect(() => {
     const handleEscape = (event) => {
@@ -313,10 +370,22 @@ function App() {
     return () => window.removeEventListener('keydown', handleEscape);
   }, []);
 
+  const enterGame = () => {
+    const currentSocket = socketRef.current;
+    if (playerId) {
+      setGameActive(true);
+      return;
+    }
+    if (!currentSocket || currentSocket.readyState !== WebSocket.OPEN) return;
+    if (joinRequested.current) return;
+    joinRequested.current = true;
+    setConnectionStatus('joining');
+    currentSocket.send(JSON.stringify({ type: 'join' }));
+  };
+
   const handleScreenClick = (event) => {
     if (gameActive || event.target.closest('button, .server-panel, .loadout-backdrop')) return;
-    setHasSpawned(true);
-    setGameActive(true);
+    enterGame();
   };
 
   return (
@@ -354,9 +423,15 @@ function App() {
       )}
 
       <section className="content">
-        <GameArena active={gameActive} spawned={hasSpawned} weapon={selectedGun} />
+        <GameArena
+          active={gameActive}
+          weapon={selectedGun}
+          socket={socket}
+          playerId={playerId}
+          gameState={gameState}
+        />
         {gameActive ? (
-          <div className="game-status">LOCAL SERVER · READY</div>
+          <div className="game-status">MULTIPLAYER · CONNECTED</div>
         ) : (
           <>
             <header className="topbar">
@@ -374,13 +449,18 @@ function App() {
                     ×
                   </button>
                 </div>
-                <button className="server-row" type="button" onClick={() => setServerPanelOpen(false)}>
-                  <span className="server-status-dot" aria-hidden="true" />
+                <button className="server-row" type="button" onClick={() => {
+                  setServerPanelOpen(false);
+                  enterGame();
+                }}>
+                  <span className={`server-status-dot ${connectionStatus === 'connected' ? '' : 'offline'}`} aria-hidden="true" />
                   <span className="server-details">
-                    <strong>Local Arena</strong>
-                    <small>Free For All · 0 players</small>
+                    <strong>Moborr Arena</strong>
+                    <small>Free For All · {gameState.players.length} players</small>
                   </span>
-                  <span className="server-ping">Ready</span>
+                  <span className={`server-ping ${connectionStatus === 'connected' ? '' : 'offline'}`}>
+                    {connectionStatus === 'connected' ? 'Ready' : 'Offline'}
+                  </span>
                 </button>
               </div>
             )}
@@ -419,11 +499,19 @@ function App() {
             )}
 
             <div className="click-to-play">
-              <span>Click to play</span>
+              <span>
+                {connectionStatus === 'connected'
+                  ? 'Click to play'
+                  : connectionStatus === 'connecting' || connectionStatus === 'joining'
+                    ? 'Connecting to server...'
+                    : connectionStatus === 'not-configured'
+                      ? 'Game server not configured'
+                      : 'Game server unavailable'}
+              </span>
             </div>
 
             <div className="action-panel" aria-label="Player options">
-              <button className="loadout-button" type="button" onClick={() => setLoadoutOpen(true)}>
+              <button className="loadout-button" type="button" onClick={() => setLoadoutOpen(true)} disabled={connectionStatus !== 'connected'}>
                 <span>LOADOUT</span>
               </button>
             </div>
